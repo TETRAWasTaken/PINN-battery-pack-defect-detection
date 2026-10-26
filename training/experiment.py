@@ -343,34 +343,39 @@ def run_single_experiment(
     best_student_state = None
     teacher.eval()
 
+    steps_per_epoch = 5
     for epoch in range(1, config.epochs_student + 1):
-        coords_surf, _, coords_coll = sampler.sample_data(device)
-        eval_coords = torch.cat([coords_surf, coords_coll], dim=0)
+        epoch_losses = []
+        for _ in range(steps_per_epoch):
+            coords_surf, _, coords_coll = sampler.sample_data(device)
+            eval_coords = torch.cat([coords_surf, coords_coll], dim=0)
 
-        with torch.no_grad():
-            t_temp, t_cond = teacher(eval_coords)
-            teacher_targets = torch.cat([t_temp, t_cond], dim=-1)
+            with torch.no_grad():
+                t_temp, t_cond = teacher(eval_coords)
+                teacher_targets = torch.cat([t_temp, t_cond], dim=-1)
 
-        optimizer_student.zero_grad()
-        student_preds = student(eval_coords)
-        distill_loss = nn.functional.mse_loss(student_preds, teacher_targets)
-        distill_loss.backward()
-        torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
-        optimizer_student.step()
+            optimizer_student.zero_grad()
+            student_preds = student(eval_coords)
+            distill_loss = nn.functional.mse_loss(student_preds, teacher_targets)
+            distill_loss.backward()
+            torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
+            optimizer_student.step()
+            epoch_losses.append(distill_loss.item())
 
+        mean_loss = float(np.mean(epoch_losses))
         if scheduler_student is not None:
             scheduler_student.step()
 
         student_history["epoch"].append(epoch)
-        student_history["distill_loss"].append(distill_loss.item())
+        student_history["distill_loss"].append(mean_loss)
 
-        if distill_loss.item() < best_student_loss:
-            best_student_loss = distill_loss.item()
+        if mean_loss < best_student_loss:
+            best_student_loss = mean_loss
             best_student_state = {k: v.detach().cpu().clone() for k, v in student.state_dict().items()}
 
         if epoch % max(1, config.epochs_student // 3) == 0 or epoch == 1:
             print(f" [Student Epoch {epoch:03d}/{config.epochs_student}] "
-                  f"Distillation Loss: {distill_loss.item():.6f}")
+                  f"Distillation Loss: {mean_loss:.6f}")
 
     if best_teacher_state is not None:
         teacher.load_state_dict(best_teacher_state)

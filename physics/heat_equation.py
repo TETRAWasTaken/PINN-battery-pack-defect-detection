@@ -66,9 +66,9 @@ def compute_pde_residual(model: nn.Module, coords: torch.Tensor,
 
     # PDE residual computation
     pde_res = rho * cp * dT_dt - div_k_grad_T - q_gen_dynamic
-    # Normalize by physical source scale for numerical conditioning
-    residual_scale = max(float(torch.mean(torch.abs(q_gen_dynamic)).item()) if isinstance(q_gen_dynamic, torch.Tensor) else abs(q_gen), 1_000_000.0)
-    normalized_residual = torch.clamp(pde_res / residual_scale, min=-100.0, max=100.0)
+    # Characteristic volumetric heat scale for numerical conditioning
+    residual_scale = max(float(torch.mean(torch.abs(q_gen_dynamic)).item()) if isinstance(q_gen_dynamic, torch.Tensor) else abs(q_gen), 2_000_000.0)
+    normalized_residual = torch.clamp(pde_res / residual_scale, min=-15.0, max=15.0)
 
     if return_pointwise:
         return torch.abs(normalized_residual)
@@ -111,9 +111,9 @@ def compute_robin_bc_residual(model: nn.Module, bc_coords: torch.Tensor,
     # Robin residual: q_cond_n - q_conv = 0
     bc_residual = q_cond_n - q_conv
 
-    # Characteristic convective flux scale ~ 200 W/m^2 for conditioning
-    flux_scale = 200.0
-    normalized_bc = torch.clamp(bc_residual / flux_scale, min=-50.0, max=50.0)
+    # Characteristic heat flux scale: k * dT/dr ~ 2.5 * 20 / 0.009 ~ 5500 W/m^2
+    flux_scale = 5000.0
+    normalized_bc = torch.clamp(bc_residual / flux_scale, min=-15.0, max=15.0)
     return torch.mean(normalized_bc ** 2)
 
 
