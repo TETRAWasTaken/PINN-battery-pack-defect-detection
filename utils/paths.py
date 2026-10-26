@@ -16,7 +16,11 @@ class Paths:
     
     @staticmethod
     def data_raw():
-        return Paths.data_dir() / "raw" / "1. BatteryAgingARC-FY08Q4"
+        return Paths.data_dir() / "raw"
+
+    @staticmethod
+    def data_raw_arc1():
+        return Paths.data_raw() / "1. BatteryAgingARC-FY08Q4"
 
     @staticmethod
     def data_processed():

@@ -20,8 +20,8 @@ def parse_args():
         description="PINN Battery Pack Defect Detection & Student Distillation Pipeline"
     )
     parser.add_argument(
-        "--mode", choices=["batch", "single"], default="batch",
-        help="Run a hyperparameter search ('batch') or one experiment ('single')"
+        "--mode", choices=["batch", "single", "preprocess"], default="batch",
+        help="Run hyperparameter search ('batch'), one experiment ('single'), or raw data preprocessing ('preprocess')"
     )
     parser.add_argument("--search", choices=["grid", "random"], default="random",
                         help="Batch search strategy")
@@ -51,7 +51,11 @@ def main():
     device = select_device(args.device)
     output_dir = args.output_dir or str(Paths.experiments_dir())
 
-    if args.mode == "batch":
+    if args.mode == "preprocess":
+        from data.preprocess import process_all_nasa_batteries
+        print("Starting Raw Data Preprocessing Pipeline...")
+        process_all_nasa_batteries(output_dir=output_dir)
+    elif args.mode == "batch":
         print("Starting Batch Training Pipeline...")
         run_batch_training_pipeline(
             grid=get_default_search_grid(),
