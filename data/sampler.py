@@ -47,6 +47,26 @@ class BatteryDataSampler:
                 self.empirical_temps = data["temp_k"]
                 self.t_max = float(self.empirical_coords[:, 3].max().item())
 
+                # If legacy dataset has only 4D coordinates [x, y, z, t], auto-augment to 6D [x, y, z, t, I, SOH]
+                if self.empirical_coords.shape[-1] == 4:
+                    augmented = False
+                    csv_path = pathlib.Path(empirical_data_path).with_suffix(".csv")
+                    if csv_path.exists():
+                        try:
+                            import pandas as pd
+                            df = pd.read_csv(csv_path)
+                            if "current_a" in df.columns and "soh" in df.columns and len(df) == len(self.empirical_coords):
+                                i_t = torch.tensor(df["current_a"].fillna(-2.0).values, dtype=torch.float32).unsqueeze(-1)
+                                s_t = torch.tensor(df["soh"].fillna(1.0).values, dtype=torch.float32).unsqueeze(-1)
+                                self.empirical_coords = torch.cat([self.empirical_coords, i_t, s_t], dim=-1)
+                                augmented = True
+                        except Exception:
+                            pass
+                    if not augmented:
+                        i_default = torch.full((len(self.empirical_coords), 1), -2.0, dtype=torch.float32)
+                        soh_default = torch.full((len(self.empirical_coords), 1), 1.0, dtype=torch.float32)
+                        self.empirical_coords = torch.cat([self.empirical_coords, i_default, soh_default], dim=-1)
+
     def sample_data(self, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Samples surface measurements and internal collocation points in 6D: [x, y, z, t, I, SOH].
@@ -67,13 +87,17 @@ class BatteryDataSampler:
             coords_surf = self.empirical_coords[indices].to(device)
             temp_surf = self.empirical_temps[indices].to(device)
 
+            if coords_surf.shape[-1] == 4:
+                i_default = torch.full((len(coords_surf), 1), -2.0, dtype=torch.float32, device=device)
+                soh_default = torch.full((len(coords_surf), 1), 1.0, dtype=torch.float32, device=device)
+                coords_surf = torch.cat([coords_surf, i_default, soh_default], dim=-1)
+
             # Sample operational condition pairs (Current_I, SOH) from empirical pool for collocation
             coll_idx = np.random.choice(len(self.empirical_coords), size=self.n_collocation, replace=True)
             if self.empirical_coords.shape[-1] >= 6:
                 i_coll = self.empirical_coords[coll_idx, 4:5]
                 soh_coll = self.empirical_coords[coll_idx, 5:6]
             else:
-                # 4D backwards compatibility fallback
                 i_coll = torch.full((self.n_collocation, 1), -2.0, dtype=torch.float32)
                 soh_coll = torch.full((self.n_collocation, 1), 1.0, dtype=torch.float32)
         else:
