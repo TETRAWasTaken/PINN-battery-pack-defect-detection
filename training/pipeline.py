@@ -32,7 +32,7 @@ def plot_batch_comparison(all_results: List[Dict[str, Any]], output_dir: str):
     if not all_results:
         return
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(30, 20))
 
     # Load history CSVs for each experiment
     cmap = plt.get_cmap("tab10")

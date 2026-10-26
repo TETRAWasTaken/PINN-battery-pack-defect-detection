@@ -59,7 +59,7 @@ def plot_experiment_convergence(
     save_path: str,
 ):
     """Generates and saves dual-panel convergence graphs for Teacher PINN and Student MLP."""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(30, 20))
 
     epochs_t = teacher_history["epoch"]
     total_loss = teacher_history["total_loss"]
