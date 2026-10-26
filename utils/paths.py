@@ -28,4 +28,4 @@ class Paths:
 
     @staticmethod
     def experiments_dir():
-        return BASE_DIR / "pinn_experiment_results"
+        return BASE_DIR / "experiments"

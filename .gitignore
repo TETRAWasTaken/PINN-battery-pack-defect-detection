@@ -3,4 +3,5 @@ data/processed/
 __pycache__/
 *.pyc
 pinn_experiment_results/
+experiments/
 .venv/
