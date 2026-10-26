@@ -1,8 +1,9 @@
 import os
 import json
 import time
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -16,7 +17,11 @@ from config.model_config import ModelConfig, set_seed
 from data.sampler import BatteryDataSampler
 from models.teacher_pinn import TeacherPINN
 from models.student_mlp import StudentMLP
-from physics.heat_equation import compute_pde_residual
+from physics.heat_equation import (
+    compute_pde_residual,
+    compute_robin_bc_residual,
+    compute_initial_condition_residual
+)
 
 
 def _evaluate(
@@ -34,6 +39,11 @@ def _evaluate(
         teacher_surface_mse = nn.functional.mse_loss(teacher_temp, temp_surf)
         teacher_pde_mse = compute_pde_residual(teacher, coords_coll)
 
+        coords_ic, _ = sampler.sample_initial_condition_data(device, n_points=100)
+        coords_bc = sampler.sample_boundary_points(device, n_points=100)
+        teacher_ic_mse = compute_initial_condition_residual(teacher, coords_ic)
+        teacher_bc_mse = compute_robin_bc_residual(teacher, coords_bc)
+
     eval_coords = torch.cat([coords_surf, coords_coll], dim=0)
     with torch.no_grad():
         teacher_targets = torch.cat(teacher(eval_coords), dim=-1)
@@ -45,6 +55,8 @@ def _evaluate(
     return {
         "teacher_surface_mse": float(teacher_surface_mse.item()),
         "teacher_pde_mse": float(teacher_pde_mse.item()),
+        "teacher_ic_mse": float(teacher_ic_mse.item()),
+        "teacher_bc_mse": float(teacher_bc_mse.item()),
         "student_mse": float(student_mse.item()),
         "student_temp_mse": float(student_temp_mse.item()),
         "student_cond_mse": float(student_cond_mse.item()),
@@ -59,98 +71,104 @@ def plot_experiment_convergence(
     save_path: str,
 ):
     """Generates and saves dual-panel convergence graphs for Teacher PINN and Student MLP."""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(30, 20))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
     epochs_t = teacher_history["epoch"]
     total_loss = teacher_history["total_loss"]
     surf_loss = teacher_history["surf_loss"]
     pde_loss = teacher_history["pde_loss"]
+    ic_loss = teacher_history.get("ic_loss", [])
+    bc_loss = teacher_history.get("bc_loss", [])
 
     # --- Left Panel: Teacher PINN Convergence ---
-    color_total = "#1f77b4"
-    color_surf = "#2ca02c"
-    color_pde = "#d62728"
+    line1 = ax1.plot(epochs_t, total_loss, label="Total Loss", color="#1f77b4", linewidth=2)
+    line2 = ax1.plot(epochs_t, surf_loss, label="Surface Sensor MSE", color="#2ca02c", linestyle="--", linewidth=1.8)
+    lines_added = line1 + line2
 
-    line1 = ax1.plot(epochs_t, total_loss, label="Total Weighted Loss", color=color_total, linewidth=2)
-    line2 = ax1.plot(epochs_t, surf_loss, label="Surface Sensor Loss (MSE)", color=color_surf, linestyle="--", linewidth=1.8)
+    if ic_loss and len(ic_loss) == len(epochs_t):
+        line_ic = ax1.plot(epochs_t, ic_loss, label="IC Residual", color="#ff7f0e", linestyle="-.", linewidth=1.5)
+        lines_added += line_ic
+    if bc_loss and len(bc_loss) == len(epochs_t):
+        line_bc = ax1.plot(epochs_t, bc_loss, label="Robin BC Residual", color="#17becf", linestyle=":", linewidth=1.5)
+        lines_added += line_bc
+
     ax1.set_xlabel("Teacher Epoch", fontsize=11, fontweight="medium")
-    ax1.set_ylabel("Total & Surface Loss", fontsize=11, color=color_total)
-    ax1.tick_params(axis="y", labelcolor=color_total)
+    ax1.set_ylabel("Loss / MSE", fontsize=11, color="#1f77b4")
+    ax1.tick_params(axis="y", labelcolor="#1f77b4")
     ax1.set_yscale("log")
     ax1.grid(True, which="both", linestyle="--", alpha=0.3)
 
-    # Use twinx for PDE residual to handle scale differences cleanly
+    # Use twinx for PDE residual
     ax1_twin = ax1.twinx()
-    line3 = ax1_twin.plot(epochs_t, pde_loss, label=f"PDE Residual Loss", color=color_pde, linestyle=":", linewidth=2)
-    ax1_twin.set_ylabel("PDE Residual Loss (MSE)", fontsize=11, color=color_pde)
-    ax1_twin.tick_params(axis="y", labelcolor=color_pde)
+    line_pde = ax1_twin.plot(epochs_t, pde_loss, label="PDE Residual", color="#d62728", linestyle=":", linewidth=2)
+    ax1_twin.set_ylabel("PDE Residual (MSE)", fontsize=11, color="#d62728")
+    ax1_twin.tick_params(axis="y", labelcolor="#d62728")
     ax1_twin.set_yscale("log")
 
-    # Combined legend
-    lines = line1 + line2 + line3
-    labels = [l.get_label() for l in lines]
-    ax1.legend(lines, labels, loc="upper right", framealpha=0.9)
+    all_lines = lines_added + line_pde
+    labels = [l.get_label() for l in all_lines]
+    ax1.legend(all_lines, labels, loc="upper right", framealpha=0.9)
     ax1.set_title(f"Teacher PINN Convergence (Final Surface MSE: {surf_loss[-1]:.4f})", fontsize=12, fontweight="bold")
 
     # --- Right Panel: Student MLP Distillation ---
     epochs_s = student_history["epoch"]
     distill_loss = student_history["distill_loss"]
-    color_distill = "#9467bd"
-
-    ax2.plot(epochs_s, distill_loss, label="Distillation Loss (MSE)", color=color_distill, linewidth=2, marker="o", markersize=4)
+    ax2.plot(epochs_s, distill_loss, label="Distillation Loss (MSE)", color="#9467bd", linewidth=2, marker="o", markersize=4)
     ax2.set_xlabel("Student Epoch", fontsize=11, fontweight="medium")
-    ax2.set_ylabel("Distillation Loss (MSE)", fontsize=11, color=color_distill)
-    ax2.tick_params(axis="y", labelcolor=color_distill)
+    ax2.set_ylabel("Distillation Loss (MSE)", fontsize=11, color="#9467bd")
     ax2.set_yscale("log")
     ax2.grid(True, which="both", linestyle="--", alpha=0.3)
     ax2.legend(loc="upper right", framealpha=0.9)
-    ax2.set_title(f"Student Distillation (Final MSE: {distill_loss[-1]:.6f})", fontsize=12, fontweight="bold")
+    ax2.set_title(f"Student MLP Distillation (Final Loss: {distill_loss[-1]:.6f})", fontsize=12, fontweight="bold")
 
+    # Overall Figure Header
     fig.suptitle(
-        f"Experiment: {config.exp_id} | LR_T={config.lr_teacher:.2e} | Hidden={config.teacher_hidden_dim} | "
-        f"Scale(S/T)={config.scale_space or config.fourier_scale:.1f}/{config.scale_time or config.fourier_scale:.1f} | "
-        f"Time: {metrics['training_time_seconds']}s",
-        fontsize=12,
-        y=1.02,
-        fontweight="bold"
+        f"Experiment: {config.exp_id} | Teacher Final Surf MSE: {surf_loss[-1]:.4f} | "
+        f"Student Final MSE: {distill_loss[-1]:.6f}",
+        fontsize=13, fontweight="bold", y=1.02
     )
-
     plt.tight_layout()
-    fig.savefig(save_path, dpi=200, bbox_inches="tight")
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
-    print(f" -> Convergence graphs saved to: {save_path}")
 
 
-def run_single_experiment(config: ModelConfig,
-                          sampler: BatteryDataSampler,
-                          device: torch.device,
-                          output_dir: str,
-                          save_plots: bool = True) -> Dict[str, Any]:
+def run_single_experiment(
+    config: ModelConfig,
+    sampler: BatteryDataSampler,
+    device: torch.device,
+    output_dir: str = "experiments",
+    save_plots: bool = True
+) -> Dict[str, Any]:
     """
-    Executes a single experiment configuration with improved PINN dynamics:
-      1. Dimensionless coordinate normalization.
-      2. Ambient temperature residual formulation.
-      3. Anisotropic Fourier feature frequencies.
-      4. Cosine Annealing learning rate schedule.
-      5. Optional adaptive loss balancing.
+    Executes a single experiment configuration integrating all 5 advanced techniques:
+      1. Conditional PINN (cPINN): 6D coordinates [x, y, z, t, I, SOH].
+      2. Wang et al. Multiplicative Gated PINN architecture.
+      3. Explicit Initial Condition and Robin Convective Boundary Condition.
+      4. Two-Stage Hybrid Optimization (Adam exploration -> L-BFGS polishing).
+      5. Residual-Based Adaptive Refinement (RAR) for collocation densification.
     """
     print(f"\n==================================================")
     print(f" Running Experiment: {config.exp_id}")
     print(f" Config: LR_T={config.lr_teacher:.2e}, Hidden={config.teacher_hidden_dim}, "
-          f"FourierScale={config.fourier_scale}, LambdaPDE={config.lambda_pde}")
+          f"FourierScale={config.fourier_scale}, GatedBackbone={config.use_gated_backbone}, "
+          f"LambdaPDE={config.lambda_pde}, LambdaIC={config.lambda_ic}, LambdaBC={config.lambda_bc}")
     print(f"==================================================")
 
     start_time = time.time()
     set_seed(config.seed)
 
-    # 1. Instantiate Teacher PINN with anisotropic multi-scale support
+    # 1. Instantiate 6D Teacher PINN with Wang Gated Backbone
     teacher = TeacherPINN(
+        in_dim=6,
         hidden_dim=config.teacher_hidden_dim,
         scale=config.fourier_scale,
         scale_space=config.scale_space,
         scale_time=config.scale_time,
-        coordinate_scale=(0.009, 0.009, 0.065, 3600.0),
-        t_ambient=297.15
+        scale_cond=config.scale_cond,
+        coordinate_scale=(0.009, 0.009, 0.065, 3600.0, 2.0, 1.0),
+        t_ambient=297.15,
+        use_gated_backbone=config.use_gated_backbone
     ).to(device)
 
     optimizer_teacher = optim.Adam(teacher.parameters(), lr=config.lr_teacher, weight_decay=1e-5)
@@ -165,23 +183,54 @@ def run_single_experiment(config: ModelConfig,
         "total_loss": [],
         "surf_loss": [],
         "pde_loss": [],
+        "ic_loss": [],
+        "bc_loss": [],
         "lr": []
     }
     best_teacher_loss = float("inf")
     best_teacher_state = None
 
+    # Adam Exploration Stage
     for epoch in range(1, config.epochs_teacher + 1):
         coords_surf, temp_surf, coords_coll = sampler.sample_data(device)
+        coords_ic, _ = sampler.sample_initial_condition_data(device, n_points=min(150, config.batch_size // 2))
+        coords_bc = sampler.sample_boundary_points(device, n_points=min(150, config.batch_size // 2))
 
-        # Surface Sensor Loss
+        # Technique 5: Residual-Based Adaptive Refinement (RAR)
+        if config.use_rar and (epoch % config.rar_frequency == 0):
+            with torch.enable_grad():
+                n_cand = config.rar_points_per_step * 5
+                r_c = np.sqrt(np.random.uniform(0, 0.009**2, n_cand))
+                th_c = np.random.uniform(0, 2 * np.pi, n_cand)
+                x_c = r_c * np.cos(th_c)
+                y_c = r_c * np.sin(th_c)
+                z_c = np.random.uniform(0, 0.065, n_cand)
+                t_c = np.random.uniform(0, 3600.0, n_cand)
+                i_c = np.random.uniform(-2.5, 0.0, n_cand)
+                soh_c = np.random.uniform(0.5, 1.0, n_cand)
+                cand_coords = torch.tensor(
+                    np.stack([x_c, y_c, z_c, t_c, i_c, soh_c], axis=-1),
+                    dtype=torch.float32, device=device
+                )
+                pointwise_res = compute_pde_residual(teacher, cand_coords, return_pointwise=True)
+                top_idx = torch.topk(pointwise_res.squeeze(-1), k=config.rar_points_per_step).indices
+                refined_pts = cand_coords[top_idx].detach()
+                coords_coll = torch.cat([coords_coll, refined_pts], dim=0)
+
+        # 1. Surface Sensor Loss
         pred_surf_temp, _ = teacher(coords_surf)
         loss_surf = nn.functional.mse_loss(pred_surf_temp, temp_surf)
 
-        # Physics-informed PDE residual loss
+        # 2. Physics-informed PDE residual loss
         loss_pde = compute_pde_residual(teacher, coords_coll)
 
+        # 3. Initial Condition loss (Technique 3)
+        loss_ic = compute_initial_condition_residual(teacher, coords_ic)
+
+        # 4. Robin Boundary Condition loss (Technique 3)
+        loss_bc = compute_robin_bc_residual(teacher, coords_bc)
+
         if config.use_adaptive_loss:
-            # Relative gradient magnitude balancing
             optimizer_teacher.zero_grad()
             loss_surf.backward(retain_graph=True)
             grad_surf_norm = torch.cat([p.grad.flatten() for p in teacher.parameters() if p.grad is not None]).norm()
@@ -196,7 +245,12 @@ def run_single_experiment(config: ModelConfig,
             effective_lambda_pde = config.lambda_pde
 
         optimizer_teacher.zero_grad()
-        total_loss = config.lambda_surf * loss_surf + effective_lambda_pde * loss_pde
+        total_loss = (
+            config.lambda_surf * loss_surf
+            + effective_lambda_pde * loss_pde
+            + config.lambda_ic * loss_ic
+            + config.lambda_bc * loss_bc
+        )
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(teacher.parameters(), max_norm=1.0)
         optimizer_teacher.step()
@@ -209,6 +263,8 @@ def run_single_experiment(config: ModelConfig,
         teacher_history["total_loss"].append(total_loss.item())
         teacher_history["surf_loss"].append(loss_surf.item())
         teacher_history["pde_loss"].append(loss_pde.item())
+        teacher_history["ic_loss"].append(loss_ic.item())
+        teacher_history["bc_loss"].append(loss_bc.item())
         teacher_history["lr"].append(current_lr)
 
         if loss_surf.item() < best_teacher_loss:
@@ -217,14 +273,58 @@ def run_single_experiment(config: ModelConfig,
 
         if epoch % max(1, config.epochs_teacher // 5) == 0 or epoch == 1:
             print(f" [Teacher Epoch {epoch:03d}/{config.epochs_teacher}] "
-                  f"Total Loss: {total_loss.item():.4f} | "
-                  f"Surf Loss: {loss_surf.item():.4f} | "
-                  f"PDE Loss: {loss_pde.item():.4f} | LR: {current_lr:.2e}")
+                  f"Total: {total_loss.item():.4f} | "
+                  f"Surf: {loss_surf.item():.4f} | "
+                  f"PDE: {loss_pde.item():.4f} | "
+                  f"IC: {loss_ic.item():.4f} | "
+                  f"BC: {loss_bc.item():.4f} | LR: {current_lr:.2e}")
 
-    # 2. Knowledge Distillation to Student MLP
+    # Technique 4: Stage 2 L-BFGS Second-Order Curvature Polishing
+    if config.lbfgs_epochs > 0:
+        print(f"\n -> Starting Stage 2: L-BFGS Second-Order Optimization ({config.lbfgs_epochs} epochs)...")
+        optimizer_lbfgs = optim.LBFGS(
+            teacher.parameters(),
+            lr=0.5,
+            max_iter=20,
+            history_size=10,
+            line_search_fn="strong_wolfe"
+        )
+        for l_epoch in range(1, config.lbfgs_epochs + 1):
+            coords_surf, temp_surf, coords_coll = sampler.sample_data(device)
+            coords_ic, _ = sampler.sample_initial_condition_data(device)
+            coords_bc = sampler.sample_boundary_points(device)
+
+            def closure():
+                optimizer_lbfgs.zero_grad()
+                pred_s, _ = teacher(coords_surf)
+                ls = nn.functional.mse_loss(pred_s, temp_surf)
+                lp = compute_pde_residual(teacher, coords_coll)
+                lic = compute_initial_condition_residual(teacher, coords_ic)
+                lbc = compute_robin_bc_residual(teacher, coords_bc)
+                step_loss = (
+                    config.lambda_surf * ls
+                    + config.lambda_pde * lp
+                    + config.lambda_ic * lic
+                    + config.lambda_bc * lbc
+                )
+                step_loss.backward()
+                return step_loss
+
+            loss_val = optimizer_lbfgs.step(closure)
+            pred_surf_now, _ = teacher(coords_surf)
+            cur_surf_loss = nn.functional.mse_loss(pred_surf_now, temp_surf).item()
+            if cur_surf_loss < best_teacher_loss:
+                best_teacher_loss = cur_surf_loss
+                best_teacher_state = {k: v.detach().cpu().clone() for k, v in teacher.state_dict().items()}
+            print(f" [L-BFGS Epoch {l_epoch:02d}/{config.lbfgs_epochs}] Loss: {loss_val.item():.4f} | Surf: {cur_surf_loss:.4f}")
+
+    # 2. Knowledge Distillation to Student MLP (6D inputs)
     print("\n -> Starting Knowledge Distillation to Student MLP...")
     student = StudentMLP(
-        coordinate_scale=(0.009, 0.009, 0.065, 3600.0),
+        in_dim=6,
+        hidden_dim=32,
+        out_dim=2,
+        coordinate_scale=(0.009, 0.009, 0.065, 3600.0, 2.0, 1.0),
         t_ambient=297.15
     ).to(device)
 
@@ -299,6 +399,8 @@ def run_single_experiment(config: ModelConfig,
         "final_teacher_loss": teacher_history["total_loss"][-1],
         "final_surface_loss": teacher_history["surf_loss"][-1],
         "final_pde_loss": teacher_history["pde_loss"][-1],
+        "final_ic_loss": teacher_history["ic_loss"][-1],
+        "final_bc_loss": teacher_history["bc_loss"][-1],
         "final_student_distill_loss": student_history["distill_loss"][-1],
         "best_teacher_surface_loss": best_teacher_loss,
         "best_student_distill_loss": best_student_loss,
@@ -321,6 +423,8 @@ def run_single_experiment(config: ModelConfig,
             "teacher_total_loss": teacher_history["total_loss"][i] if i < len(teacher_history["epoch"]) else None,
             "teacher_surf_loss": teacher_history["surf_loss"][i] if i < len(teacher_history["epoch"]) else None,
             "teacher_pde_loss": teacher_history["pde_loss"][i] if i < len(teacher_history["epoch"]) else None,
+            "teacher_ic_loss": teacher_history["ic_loss"][i] if i < len(teacher_history["ic_loss"]) else None,
+            "teacher_bc_loss": teacher_history["bc_loss"][i] if i < len(teacher_history["bc_loss"]) else None,
             "teacher_lr": teacher_history["lr"][i] if i < len(teacher_history["lr"]) else None,
             "student_distill_loss": student_history["distill_loss"][i] if i < len(student_history["epoch"]) else None,
         }
@@ -338,16 +442,25 @@ def run_single_experiment(config: ModelConfig,
         "scale_time": config.scale_time or config.fourier_scale,
         "lambda_pde": config.lambda_pde,
         "lambda_surf": config.lambda_surf,
+        "lambda_ic": config.lambda_ic,
+        "lambda_bc": config.lambda_bc,
+        "use_gated_backbone": config.use_gated_backbone,
+        "lbfgs_epochs": config.lbfgs_epochs,
+        "use_rar": config.use_rar,
         "epochs_teacher": config.epochs_teacher,
         "epochs_student": config.epochs_student,
         "final_teacher_loss": metrics["final_teacher_loss"],
         "final_surface_loss": metrics["final_surface_loss"],
         "final_pde_loss": metrics["final_pde_loss"],
+        "final_ic_loss": metrics["final_ic_loss"],
+        "final_bc_loss": metrics["final_bc_loss"],
         "final_student_distill_loss": metrics["final_student_distill_loss"],
         "best_teacher_surface_loss": best_teacher_loss,
         "best_student_distill_loss": best_student_loss,
         "eval_teacher_surface_mse": evaluation_metrics["teacher_surface_mse"],
         "eval_teacher_pde_mse": evaluation_metrics["teacher_pde_mse"],
+        "eval_teacher_ic_mse": evaluation_metrics["teacher_ic_mse"],
+        "eval_teacher_bc_mse": evaluation_metrics["teacher_bc_mse"],
         "eval_student_mse": evaluation_metrics["student_mse"],
         "eval_student_temp_mse": evaluation_metrics["student_temp_mse"],
         "eval_student_cond_mse": evaluation_metrics["student_cond_mse"],

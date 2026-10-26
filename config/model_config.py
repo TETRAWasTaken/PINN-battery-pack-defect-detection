@@ -15,14 +15,22 @@ class ModelConfig:
     fourier_scale: float = 5.0
     scale_space: Optional[float] = None
     scale_time: Optional[float] = None
+    scale_cond: Optional[float] = None
     lambda_pde: float = 0.01
     lambda_surf: float = 1.0
+    lambda_ic: float = 0.5
+    lambda_bc: float = 0.1
     epochs_teacher: int = 20
     epochs_student: int = 10
     batch_size: int = 256
     seed: int = 42
     use_lr_scheduler: bool = True
     use_adaptive_loss: bool = False
+    use_gated_backbone: bool = True
+    lbfgs_epochs: int = 0
+    use_rar: bool = False
+    rar_frequency: int = 10
+    rar_points_per_step: int = 100
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

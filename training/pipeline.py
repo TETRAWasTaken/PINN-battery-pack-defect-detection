@@ -123,14 +123,22 @@ def run_batch_training_pipeline(
             fourier_scale=param_set.get("fourier_scale", 5.0),
             scale_space=param_set.get("scale_space"),
             scale_time=param_set.get("scale_time"),
+            scale_cond=param_set.get("scale_cond"),
             lambda_pde=param_set.get("lambda_pde", 0.01),
             lambda_surf=param_set.get("lambda_surf", 1.0),
+            lambda_ic=param_set.get("lambda_ic", 0.5),
+            lambda_bc=param_set.get("lambda_bc", 0.1),
             epochs_teacher=epochs_teacher,
             epochs_student=epochs_student,
             batch_size=256,
             seed=seed + idx,
             use_lr_scheduler=param_set.get("use_lr_scheduler", True),
             use_adaptive_loss=param_set.get("use_adaptive_loss", False),
+            use_gated_backbone=param_set.get("use_gated_backbone", True),
+            lbfgs_epochs=param_set.get("lbfgs_epochs", 0),
+            use_rar=param_set.get("use_rar", False),
+            rar_frequency=param_set.get("rar_frequency", 10),
+            rar_points_per_step=param_set.get("rar_points_per_step", 100),
         )
 
         metrics = run_single_experiment(config, sampler, device, output_dir, save_plots=save_plots)

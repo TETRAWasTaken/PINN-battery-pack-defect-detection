@@ -199,6 +199,12 @@ def format_pinn_surface_dataset(timeseries_df: pd.DataFrame,
     theta_angles = [2.0 * np.pi * i / n_azimuth_sensors for i in range(n_azimuth_sensors)]
     z_pos = height / 2.0  # Mid-height thermocouple mounting
 
+    # Compute SOH from capacity (nominal rated = 2.0 Ah)
+    soh_values = np.clip(
+        df_sub["capacity_ah"].ffill().bfill().fillna(2.0).values / 2.0,
+        0.4, 1.0
+    )
+
     surface_records = []
     for theta in theta_angles:
         x_val = radius * np.cos(theta)
@@ -217,19 +223,20 @@ def format_pinn_surface_dataset(timeseries_df: pd.DataFrame,
             "y": y_val,
             "z": z_pos,
             "t": df_sub["time_s"].values,
+            "current_a": df_sub["current_a"].fillna(-2.0).values,
+            "soh": soh_values,
             "temp_k": df_sub["temp_k"].values,
             "temp_c": df_sub["temp_c"].values,
             "voltage_v": df_sub["voltage_v"].values,
-            "current_a": df_sub["current_a"].values,
             "q_gen_w_m3": q_gen_est.values
         })
         surface_records.append(sub)
 
     pinn_surface_df = pd.concat(surface_records, ignore_index=True)
 
-    # Tensor representations: coords (N, 4) and targets (N, 1)
+    # Tensor representations: 6D coords [x, y, z, t, I, SOH] and targets (N, 1)
     coords_tensor = torch.tensor(
-        pinn_surface_df[["x", "y", "z", "t"]].values, dtype=torch.float32
+        pinn_surface_df[["x", "y", "z", "t", "current_a", "soh"]].values, dtype=torch.float32
     )
     targets_tensor = torch.tensor(
         pinn_surface_df[["temp_k"]].values, dtype=torch.float32
@@ -244,8 +251,8 @@ def generate_collocation_dataset(n_points: int = 50000,
                                  t_max: float = 3600.0,
                                  seed: int = 42) -> torch.Tensor:
     """
-    Generates interior collocation points (x, y, z, t) within the 18650 cylinder volume
-    for physics-informed residual evaluation during training.
+    Generates interior collocation points (x, y, z, t, I, SOH) within the 18650 cylinder volume
+    and operational operating envelopes for physics-informed residual evaluation during training.
     """
     np.random.seed(seed)
     r = np.sqrt(np.random.uniform(0, radius**2, n_points))
@@ -255,7 +262,13 @@ def generate_collocation_dataset(n_points: int = 50000,
     z = np.random.uniform(0, height, n_points)
     t = np.random.uniform(0, t_max, n_points)
 
-    coll_coords = np.stack([x, y, z, t], axis=-1)
+    # Operational condition bounds:
+    # Current I: discharge range [-2.5, 0.0] A
+    # SOH: degradation range [0.5, 1.0]
+    current_i = np.random.uniform(-2.5, 0.0, n_points)
+    soh = np.random.uniform(0.5, 1.0, n_points)
+
+    coll_coords = np.stack([x, y, z, t, current_i, soh], axis=-1)
     return torch.tensor(coll_coords, dtype=torch.float32)
 
 
@@ -333,7 +346,7 @@ def process_all_nasa_batteries(raw_dir: Optional[str] = None,
         "temp_k": surf_temps,
         "metadata": {
             "num_samples": len(surf_coords),
-            "columns": ["x", "y", "z", "t"],
+            "columns": ["x", "y", "z", "t", "current_a", "soh"],
             "target": "temp_k",
             "cell_radius": CELL_RADIUS,
             "cell_height": CELL_HEIGHT
@@ -344,7 +357,7 @@ def process_all_nasa_batteries(raw_dir: Optional[str] = None,
         "coords": coll_coords,
         "metadata": {
             "num_samples": len(coll_coords),
-            "columns": ["x", "y", "z", "t"],
+            "columns": ["x", "y", "z", "t", "current_a", "soh"],
             "cell_radius": CELL_RADIUS,
             "cell_height": CELL_HEIGHT,
             "t_max": t_max_observed

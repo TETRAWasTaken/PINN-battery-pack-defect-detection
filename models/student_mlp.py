@@ -9,12 +9,12 @@ class StudentMLP(nn.Module):
       - Ambient baseline offset for temperature
       - Bounded thermal conductivity in physical range [0.5, 5.0] W/(m*K)
     """
-    def __init__(self, in_dim: int = 4, hidden_dim: int = 32, out_dim: int = 2, num_layers: int = 3,
-                 coordinate_scale: tuple[float, ...] = (0.009, 0.009, 0.065, 3600.0),
+    def __init__(self, in_dim: int = 6, hidden_dim: int = 32, out_dim: int = 2, num_layers: int = 3,
+                 coordinate_scale: tuple[float, ...] = (0.009, 0.009, 0.065, 3600.0, 2.0, 1.0),
                  t_ambient: float = 297.15):
         super().__init__()
         if len(coordinate_scale) != in_dim:
-            raise ValueError("coordinate_scale must contain one value per input coordinate")
+            raise ValueError(f"coordinate_scale length {len(coordinate_scale)} must match in_dim {in_dim}")
 
         self.t_ambient = t_ambient
         self.register_buffer("coordinate_scale", torch.tensor(coordinate_scale, dtype=torch.float32))

@@ -1,26 +1,36 @@
 import torch
 import torch.nn as nn
+import numpy as np
+from typing import Optional
+
+CELL_RADIUS = 0.009
+CELL_HEIGHT = 0.065
+CELL_VOLUME = np.pi * (CELL_RADIUS ** 2) * CELL_HEIGHT  # ~1.654e-5 m^3
+
 
 def compute_pde_residual(model: nn.Module, coords: torch.Tensor,
-                         rho: float = 2200.0, cp: float = 1000.0, q_gen: float = 50000.0) -> torch.Tensor:
+                         rho: float = 2200.0, cp: float = 1000.0,
+                         q_gen: float = 50000.0,
+                         return_pointwise: bool = False) -> torch.Tensor:
     """
     Computes the 3D Heat Conduction PDE residual using automatic differentiation:
-        R_pde = rho * cp * (dT/dt) - div(k * grad(T)) - Q_gen = 0
+        R_pde = rho * cp * (dT/dt) - div(k * grad(T)) - Q_gen(I, SOH) = 0
         
     Parameters:
         model: Teacher PINN predicting (temperature, thermal_conductivity)
-        coords: Tensor of spatial-temporal points [x, y, z, t] of shape (N, 4)
+        coords: Tensor of spatial-temporal points [x, y, z, t, I, SOH] (N, 6) or [x, y, z, t] (N, 4)
         rho: Cell density in kg/m^3 (default: 2200.0)
         cp: Specific heat capacity in J/(kg*K) (default: 1000.0)
-        q_gen: Internal volumetric heat generation rate in W/m^3 (default: 50000.0)
+        q_gen: Fallback static volumetric heat generation in W/m^3 (default: 50000.0)
+        return_pointwise: If True, returns (N, 1) absolute normalized residual for RAR point selection.
         
     Returns:
-        torch.Tensor: Mean Squared Error (MSE) of the PDE residual across all collocation points.
+        torch.Tensor: Mean Squared Error (MSE) of the PDE residual or (N, 1) pointwise absolute residuals.
     """
     coords_req = coords.clone().detach().requires_grad_(True)
     temp_pred, cond_pred = model(coords_req)
 
-    # First derivatives w.r.t coordinates [x, y, z, t]
+    # First derivatives w.r.t coordinates
     grads = torch.autograd.grad(
         outputs=temp_pred,
         inputs=coords_req,
@@ -32,7 +42,17 @@ def compute_pde_residual(model: nn.Module, coords: torch.Tensor,
     dT_dz = grads[:, 2:3]
     dT_dt = grads[:, 3:4]
 
-    # Thermal flux components: q_flux = -k * grad(T) -> we compute div(k * grad(T))
+    # Dynamic Joule heating: Q_gen(I, SOH) = |I|^2 * R_int(SOH) / V_cell
+    if coords.shape[-1] >= 6:
+        curr_i = coords_req[:, 4:5]
+        soh = coords_req[:, 5:6]
+        # Internal resistance grows as SOH degrades: R_int in [0.08, 0.20] Ohm
+        r_int = 0.08 + 0.12 * (1.0 - torch.clamp(soh, 0.4, 1.0))
+        q_gen_dynamic = (torch.abs(curr_i) ** 2 * r_int) / CELL_VOLUME
+    else:
+        q_gen_dynamic = q_gen
+
+    # Thermal flux components: q_flux = -k * grad(T) -> compute div(k * grad(T))
     flux_x = cond_pred * dT_dx
     flux_y = cond_pred * dT_dy
     flux_z = cond_pred * dT_dz
@@ -45,8 +65,65 @@ def compute_pde_residual(model: nn.Module, coords: torch.Tensor,
     div_k_grad_T = dflux_dx + dflux_dy + dflux_dz
 
     # PDE residual computation
-    pde_res = rho * cp * dT_dt - div_k_grad_T - q_gen
-    # Normalize by the source scale to keep the optimization objective numerically stable.
-    residual_scale = max(abs(q_gen), rho * cp * 50.0 / 300.0, 1_000_000.0)
+    pde_res = rho * cp * dT_dt - div_k_grad_T - q_gen_dynamic
+    # Normalize by physical source scale for numerical conditioning
+    residual_scale = max(float(torch.mean(torch.abs(q_gen_dynamic)).item()) if isinstance(q_gen_dynamic, torch.Tensor) else abs(q_gen), 1_000_000.0)
     normalized_residual = torch.clamp(pde_res / residual_scale, min=-100.0, max=100.0)
+
+    if return_pointwise:
+        return torch.abs(normalized_residual)
     return torch.mean(normalized_residual ** 2)
+
+
+def compute_robin_bc_residual(model: nn.Module, bc_coords: torch.Tensor,
+                              h_conv: float = 10.0, t_ambient: float = 297.15,
+                              radius: float = CELL_RADIUS) -> torch.Tensor:
+    """
+    Computes Robin convective boundary condition residual on outer cylindrical surface:
+        -k * (dT/dn) = h_conv * (T - T_ambient)
+        R_bc = -k * (x/R * dT/dx + y/R * dT/dy) - h_conv * (T - T_ambient) = 0
+    """
+    coords_req = bc_coords.clone().detach().requires_grad_(True)
+    temp_pred, cond_pred = model(coords_req)
+
+    grads = torch.autograd.grad(
+        outputs=temp_pred,
+        inputs=coords_req,
+        grad_outputs=torch.ones_like(temp_pred),
+        create_graph=True
+    )[0]
+    dT_dx = grads[:, 0:1]
+    dT_dy = grads[:, 1:2]
+
+    # Outward radial unit normal: n = (x/R, y/R, 0)
+    x = coords_req[:, 0:1]
+    y = coords_req[:, 1:2]
+    r = torch.sqrt(x ** 2 + y ** 2 + 1e-12)
+    n_x = x / r
+    n_y = y / r
+
+    # Heat conduction flux in normal direction: q_cond_n = -k * (n_x * dT/dx + n_y * dT/dy)
+    q_cond_n = -cond_pred * (n_x * dT_dx + n_y * dT_dy)
+
+    # Convective heat flux: q_conv = h_conv * (T - T_ambient)
+    q_conv = h_conv * (temp_pred - t_ambient)
+
+    # Robin residual: q_cond_n - q_conv = 0
+    bc_residual = q_cond_n - q_conv
+
+    # Characteristic convective flux scale ~ 200 W/m^2 for conditioning
+    flux_scale = 200.0
+    normalized_bc = torch.clamp(bc_residual / flux_scale, min=-50.0, max=50.0)
+    return torch.mean(normalized_bc ** 2)
+
+
+def compute_initial_condition_residual(model: nn.Module, ic_coords: torch.Tensor,
+                                       t_ambient: float = 297.15) -> torch.Tensor:
+    """
+    Computes Initial Condition residual at t=0:
+        R_ic = T(x, y, z, 0) - T_ambient = 0
+    """
+    temp_pred, _ = model(ic_coords)
+    ic_residual = temp_pred - t_ambient
+    return torch.mean(ic_residual ** 2)
+
