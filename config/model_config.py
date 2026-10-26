@@ -1,7 +1,7 @@
 import os
 import random
 from dataclasses import dataclass, asdict
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import numpy as np
 import torch
 
@@ -13,12 +13,16 @@ class ModelConfig:
     lr_student: float = 1e-3
     teacher_hidden_dim: int = 128
     fourier_scale: float = 5.0
+    scale_space: Optional[float] = None
+    scale_time: Optional[float] = None
     lambda_pde: float = 0.01
     lambda_surf: float = 1.0
     epochs_teacher: int = 20
     epochs_student: int = 10
     batch_size: int = 256
     seed: int = 42
+    use_lr_scheduler: bool = True
+    use_adaptive_loss: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -43,25 +47,32 @@ def get_default_search_grid() -> Dict[str, List[Any]]:
     return {
         "lr_teacher": [1e-3, 5e-4],
         "teacher_hidden_dim": [64, 128],
-        "fourier_scale": [3.0, 10.0],
-        "lambda_pde": [0.01, 0.1]
+        "fourier_scale": [3.0, 8.0],
+        "lambda_pde": [0.005, 0.02]
     }
 
 
 def sample_random_configs(n_trials: int, seed: int = 42) -> List[Dict[str, Any]]:
-    """Sample reproducible hyperparameter configurations without exhaustive enumeration."""
+    """Sample reproducible hyperparameter configurations with multi-scale ranges."""
     if n_trials < 1:
         raise ValueError("n_trials must be at least 1")
 
     rng = random.Random(seed)
     configs = []
     for _ in range(n_trials):
+        # Sample space and time scales separately
+        scale_space = rng.uniform(2.0, 8.0)
+        scale_time = rng.uniform(0.5, 3.0)
         configs.append({
             "lr_teacher": 10 ** rng.uniform(-4.0, -2.5),
-            "lr_student": 10 ** rng.uniform(-4.0, -2.5),
+            "lr_student": 10 ** rng.uniform(-3.5, -2.0),
             "teacher_hidden_dim": rng.choice([64, 96, 128, 192]),
-            "fourier_scale": rng.uniform(2.0, 12.0),
-            "lambda_pde": 10 ** rng.uniform(-3.0, -0.5),
-            "lambda_surf": 10 ** rng.uniform(-0.5, 0.5),
+            "fourier_scale": scale_space,
+            "scale_space": scale_space,
+            "scale_time": scale_time,
+            "lambda_pde": 10 ** rng.uniform(-3.0, -1.0),
+            "lambda_surf": 1.0,
+            "use_lr_scheduler": True,
+            "use_adaptive_loss": rng.choice([True, False]),
         })
     return configs

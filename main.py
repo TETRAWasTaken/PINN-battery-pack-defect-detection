@@ -41,8 +41,12 @@ def parse_args():
     parser.add_argument("--lr-student", type=float, default=1e-3, help="Student learning rate")
     parser.add_argument("--teacher-hidden-dim", type=int, default=128, help="Teacher hidden layer size")
     parser.add_argument("--fourier-scale", type=float, default=5.0, help="Fourier feature projection scale")
+    parser.add_argument("--scale-space", type=float, default=None, help="Spatial Fourier frequency scale (anisotropic)")
+    parser.add_argument("--scale-time", type=float, default=None, help="Temporal Fourier frequency scale (anisotropic)")
     parser.add_argument("--lambda-pde", type=float, default=0.01, help="Physics loss weighting factor")
     parser.add_argument("--lambda-surf", type=float, default=1.0, help="Surface sensor loss weighting factor")
+    parser.add_argument("--no-scheduler", action="store_true", help="Disable CosineAnnealingLR scheduler")
+    parser.add_argument("--adaptive-loss", action="store_true", help="Enable dynamic gradient balancing loss")
     return parser.parse_args()
 
 
@@ -77,12 +81,16 @@ def main():
             lr_student=args.lr_student,
             teacher_hidden_dim=args.teacher_hidden_dim,
             fourier_scale=args.fourier_scale,
+            scale_space=args.scale_space,
+            scale_time=args.scale_time,
             lambda_pde=args.lambda_pde,
             lambda_surf=args.lambda_surf,
             epochs_teacher=args.epochs_teacher,
             epochs_student=args.epochs_student,
             batch_size=256,
             seed=args.seed,
+            use_lr_scheduler=not args.no_scheduler,
+            use_adaptive_loss=args.adaptive_loss,
         )
         sampler = BatteryDataSampler(n_surface=args.n_surface, n_collocation=args.n_collocation)
         metrics = run_single_experiment(config, sampler, device, output_dir)

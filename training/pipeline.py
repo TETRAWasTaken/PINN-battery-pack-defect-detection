@@ -121,12 +121,16 @@ def run_batch_training_pipeline(
             lr_student=param_set.get("lr_student", 1e-3),
             teacher_hidden_dim=param_set.get("teacher_hidden_dim", 128),
             fourier_scale=param_set.get("fourier_scale", 5.0),
+            scale_space=param_set.get("scale_space"),
+            scale_time=param_set.get("scale_time"),
             lambda_pde=param_set.get("lambda_pde", 0.01),
             lambda_surf=param_set.get("lambda_surf", 1.0),
             epochs_teacher=epochs_teacher,
             epochs_student=epochs_student,
             batch_size=256,
             seed=seed + idx,
+            use_lr_scheduler=param_set.get("use_lr_scheduler", True),
+            use_adaptive_loss=param_set.get("use_adaptive_loss", False),
         )
 
         metrics = run_single_experiment(config, sampler, device, output_dir, save_plots=save_plots)
