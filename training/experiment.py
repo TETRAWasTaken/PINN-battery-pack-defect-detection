@@ -1,17 +1,23 @@
 import os
 import json
 import time
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import pandas as pd
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from config.model_config import ModelConfig, set_seed
 from data.sampler import BatteryDataSampler
 from models.teacher_pinn import TeacherPINN
 from models.student_mlp import StudentMLP
 from physics.heat_equation import compute_pde_residual
+
 
 def _evaluate(
     teacher: nn.Module,
@@ -45,15 +51,86 @@ def _evaluate(
     }
 
 
+def plot_experiment_convergence(
+    teacher_history: Dict[str, List[float]],
+    student_history: Dict[str, List[float]],
+    config: ModelConfig,
+    metrics: Dict[str, Any],
+    save_path: str,
+):
+    """Generates and saves dual-panel convergence graphs for Teacher PINN and Student MLP."""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    epochs_t = teacher_history["epoch"]
+    total_loss = teacher_history["total_loss"]
+    surf_loss = teacher_history["surf_loss"]
+    pde_loss = teacher_history["pde_loss"]
+
+    # --- Left Panel: Teacher PINN Convergence ---
+    color_total = "#1f77b4"
+    color_surf = "#2ca02c"
+    color_pde = "#d62728"
+
+    line1 = ax1.plot(epochs_t, total_loss, label="Total Weighted Loss", color=color_total, linewidth=2)
+    line2 = ax1.plot(epochs_t, surf_loss, label="Surface Sensor Loss (MSE)", color=color_surf, linestyle="--", linewidth=1.8)
+    ax1.set_xlabel("Teacher Epoch", fontsize=11, fontweight="medium")
+    ax1.set_ylabel("Total & Surface Loss", fontsize=11, color=color_total)
+    ax1.tick_params(axis="y", labelcolor=color_total)
+    ax1.set_yscale("log")
+    ax1.grid(True, which="both", linestyle="--", alpha=0.3)
+
+    # Use twinx for PDE residual to handle scale differences cleanly
+    ax1_twin = ax1.twinx()
+    line3 = ax1_twin.plot(epochs_t, pde_loss, label=f"PDE Residual Loss (λ={config.lambda_pde})", color=color_pde, linestyle=":", linewidth=2)
+    ax1_twin.set_ylabel("PDE Residual Loss (MSE)", fontsize=11, color=color_pde)
+    ax1_twin.tick_params(axis="y", labelcolor=color_pde)
+    ax1_twin.set_yscale("log")
+
+    # Combined legend
+    lines = line1 + line2 + line3
+    labels = [l.get_label() for l in lines]
+    ax1.legend(lines, labels, loc="upper right", framealpha=0.9)
+    ax1.set_title(f"Teacher PINN Convergence (Final: {total_loss[-1]:.4f})", fontsize=12, fontweight="bold")
+
+    # --- Right Panel: Student MLP Distillation ---
+    epochs_s = student_history["epoch"]
+    distill_loss = student_history["distill_loss"]
+    color_distill = "#9467bd"
+
+    ax2.plot(epochs_s, distill_loss, label="Distillation Loss (MSE)", color=color_distill, linewidth=2, marker="o", markersize=4)
+    ax2.set_xlabel("Student Epoch", fontsize=11, fontweight="medium")
+    ax2.set_ylabel("Distillation Loss (MSE)", fontsize=11, color=color_distill)
+    ax2.tick_params(axis="y", labelcolor=color_distill)
+    ax2.set_yscale("log")
+    ax2.grid(True, which="both", linestyle="--", alpha=0.3)
+    ax2.legend(loc="upper right", framealpha=0.9)
+    ax2.set_title(f"Student Distillation Convergence (Final: {distill_loss[-1]:.6f})", fontsize=12, fontweight="bold")
+
+    # Overall Figure Supertitle
+    fig.suptitle(
+        f"Experiment: {config.exp_id} | LR_T={config.lr_teacher} | Hidden={config.teacher_hidden_dim} | "
+        f"FourierScale={config.fourier_scale} | λ_PDE={config.lambda_pde} | Time: {metrics['training_time_seconds']}s",
+        fontsize=12,
+        y=1.02,
+        fontweight="bold"
+    )
+
+    plt.tight_layout()
+    fig.savefig(save_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f" -> Convergence graphs saved to: {save_path}")
+
+
 def run_single_experiment(config: ModelConfig,
                           sampler: BatteryDataSampler,
                           device: torch.device,
-                          output_dir: str) -> Dict[str, Any]:
+                          output_dir: str,
+                          save_plots: bool = True) -> Dict[str, Any]:
     """
     Executes a single experiment configuration:
       1. Trains the Teacher Fourier-SIREN PINN with Surface Data + Heat PDE Residuals.
       2. Distills knowledge from Teacher PINN into the lightweight Student MLP.
-      3. Saves checkpoints (teacher_pinn.pt, student_mlp.pt) and metrics.json.
+      3. Saves checkpoints, metrics (JSON + CSV), and convergence plots.
     """
     print(f"\n==================================================")
     print(f" Running Experiment: {config.exp_id}")
@@ -71,9 +148,15 @@ def run_single_experiment(config: ModelConfig,
     ).to(device)
     optimizer_teacher = optim.Adam(teacher.parameters(), lr=config.lr_teacher)
 
-    teacher_loss_history = []
+    teacher_history = {
+        "epoch": [],
+        "total_loss": [],
+        "surf_loss": [],
+        "pde_loss": []
+    }
     best_teacher_loss = float("inf")
     best_teacher_state = None
+
     for epoch in range(1, config.epochs_teacher + 1):
         coords_surf, temp_surf, coords_coll = sampler.sample_data(device)
 
@@ -92,7 +175,11 @@ def run_single_experiment(config: ModelConfig,
         torch.nn.utils.clip_grad_norm_(teacher.parameters(), max_norm=1.0)
         optimizer_teacher.step()
 
-        teacher_loss_history.append(total_loss.item())
+        teacher_history["epoch"].append(epoch)
+        teacher_history["total_loss"].append(total_loss.item())
+        teacher_history["surf_loss"].append(loss_surf.item())
+        teacher_history["pde_loss"].append(loss_pde.item())
+
         if total_loss.item() < best_teacher_loss:
             best_teacher_loss = total_loss.item()
             best_teacher_state = {k: v.detach().cpu().clone() for k, v in teacher.state_dict().items()}
@@ -108,7 +195,10 @@ def run_single_experiment(config: ModelConfig,
     student = StudentMLP().to(device)
     optimizer_student = optim.Adam(student.parameters(), lr=config.lr_student)
 
-    student_loss_history = []
+    student_history = {
+        "epoch": [],
+        "distill_loss": []
+    }
     best_student_loss = float("inf")
     best_student_state = None
     teacher.eval()
@@ -128,7 +218,9 @@ def run_single_experiment(config: ModelConfig,
         torch.nn.utils.clip_grad_norm_(student.parameters(), max_norm=1.0)
         optimizer_student.step()
 
-        student_loss_history.append(distill_loss.item())
+        student_history["epoch"].append(epoch)
+        student_history["distill_loss"].append(distill_loss.item())
+
         if distill_loss.item() < best_student_loss:
             best_student_loss = distill_loss.item()
             best_student_state = {k: v.detach().cpu().clone() for k, v in student.state_dict().items()}
@@ -142,7 +234,7 @@ def run_single_experiment(config: ModelConfig,
     if best_student_state is not None:
         student.load_state_dict(best_student_state)
 
-    # Use a separate seeded batch so evaluation is not the final training batch.
+    # Use a separate seeded batch so evaluation is on a distinct holdout batch
     set_seed(config.seed + 1)
     evaluation_metrics = _evaluate(teacher, student, sampler, device)
     elapsed_time = time.time() - start_time
@@ -161,8 +253,10 @@ def run_single_experiment(config: ModelConfig,
     metrics = {
         "exp_id": config.exp_id,
         "config": config.to_dict(),
-        "final_teacher_loss": teacher_loss_history[-1],
-        "final_student_distill_loss": student_loss_history[-1],
+        "final_teacher_loss": teacher_history["total_loss"][-1],
+        "final_surface_loss": teacher_history["surf_loss"][-1],
+        "final_pde_loss": teacher_history["pde_loss"][-1],
+        "final_student_distill_loss": student_history["distill_loss"][-1],
         "best_teacher_loss": best_teacher_loss,
         "best_student_distill_loss": best_student_loss,
         "evaluation": evaluation_metrics,
@@ -171,7 +265,74 @@ def run_single_experiment(config: ModelConfig,
         "training_time_seconds": round(elapsed_time, 2)
     }
 
+    # Save metrics JSON
     with open(os.path.join(exp_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=4)
+
+    # Save training loss history CSV
+    history_records = []
+    max_epochs = max(len(teacher_history["epoch"]), len(student_history["epoch"]))
+    for i in range(max_epochs):
+        rec = {
+            "epoch": i + 1,
+            "teacher_total_loss": teacher_history["total_loss"][i] if i < len(teacher_history["epoch"]) else None,
+            "teacher_surf_loss": teacher_history["surf_loss"][i] if i < len(teacher_history["epoch"]) else None,
+            "teacher_pde_loss": teacher_history["pde_loss"][i] if i < len(teacher_history["epoch"]) else None,
+            "student_distill_loss": student_history["distill_loss"][i] if i < len(student_history["epoch"]) else None,
+        }
+        history_records.append(rec)
+    pd.DataFrame(history_records).to_csv(os.path.join(exp_dir, "training_history.csv"), index=False)
+
+    # Save flattened single-experiment metrics CSV
+    flat_metrics = {
+        "exp_id": config.exp_id,
+        "lr_teacher": config.lr_teacher,
+        "lr_student": config.lr_student,
+        "teacher_hidden_dim": config.teacher_hidden_dim,
+        "fourier_scale": config.fourier_scale,
+        "lambda_pde": config.lambda_pde,
+        "lambda_surf": config.lambda_surf,
+        "epochs_teacher": config.epochs_teacher,
+        "epochs_student": config.epochs_student,
+        "final_teacher_loss": metrics["final_teacher_loss"],
+        "final_surface_loss": metrics["final_surface_loss"],
+        "final_pde_loss": metrics["final_pde_loss"],
+        "final_student_distill_loss": metrics["final_student_distill_loss"],
+        "best_teacher_loss": best_teacher_loss,
+        "best_student_distill_loss": best_student_loss,
+        "eval_teacher_surface_mse": evaluation_metrics["teacher_surface_mse"],
+        "eval_teacher_pde_mse": evaluation_metrics["teacher_pde_mse"],
+        "eval_student_mse": evaluation_metrics["student_mse"],
+        "eval_student_temp_mse": evaluation_metrics["student_temp_mse"],
+        "eval_student_cond_mse": evaluation_metrics["student_cond_mse"],
+        "teacher_params": metrics["teacher_params"],
+        "student_params": metrics["student_params"],
+        "training_time_seconds": metrics["training_time_seconds"]
+    }
+    pd.DataFrame([flat_metrics]).to_csv(os.path.join(exp_dir, "metrics.csv"), index=False)
+
+    # Append to global experiments_history.csv in output_dir
+    global_csv = os.path.join(output_dir, "experiments_history.csv")
+    global_df = pd.DataFrame([flat_metrics])
+    if os.path.exists(global_csv):
+        try:
+            prev_df = pd.read_csv(global_csv)
+            # Remove existing row with same exp_id if re-running
+            prev_df = prev_df[prev_df["exp_id"] != config.exp_id]
+            global_df = pd.concat([prev_df, global_df], ignore_index=True)
+        except Exception:
+            pass
+    global_df.to_csv(global_csv, index=False)
+
+    # Generate and save convergence curves
+    if save_plots:
+        plot_path = os.path.join(exp_dir, "convergence_curves.png")
+        plot_experiment_convergence(
+            teacher_history=teacher_history,
+            student_history=student_history,
+            config=config,
+            metrics=metrics,
+            save_path=plot_path
+        )
 
     return metrics
