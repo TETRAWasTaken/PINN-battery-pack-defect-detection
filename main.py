@@ -40,6 +40,7 @@ def parse_args():
     parser.add_argument("--lr-teacher", type=float, default=1e-3, help="Teacher learning rate")
     parser.add_argument("--lr-student", type=float, default=1e-3, help="Student learning rate")
     parser.add_argument("--teacher-hidden-dim", type=int, default=128, help="Teacher hidden layer size")
+    parser.add_argument("--student-hidden-dim", type=int, default=64, help="Student hidden layer size")
     parser.add_argument("--fourier-scale", type=float, default=5.0, help="Fourier feature projection scale")
     parser.add_argument("--scale-space", type=float, default=None, help="Spatial Fourier frequency scale (anisotropic)")
     parser.add_argument("--scale-time", type=float, default=None, help="Temporal Fourier frequency scale (anisotropic)")
@@ -47,7 +48,7 @@ def parse_args():
     parser.add_argument("--lambda-pde", type=float, default=0.01, help="Physics loss weighting factor")
     parser.add_argument("--lambda-surf", type=float, default=1.0, help="Surface sensor loss weighting factor")
     parser.add_argument("--lambda-ic", type=float, default=0.5, help="Initial condition loss weighting factor")
-    parser.add_argument("--lambda-bc", type=float, default=0.1, help="Robin convective BC loss weighting factor")
+    parser.add_argument("--lambda-bc", type=float, default=0.01, help="Robin convective BC loss weighting factor")
     parser.add_argument("--no-scheduler", action="store_true", help="Disable CosineAnnealingLR scheduler")
     parser.add_argument("--adaptive-loss", action="store_true", help="Enable dynamic gradient balancing loss")
     parser.add_argument("--no-gated-backbone", action="store_true", help="Disable Wang et al. gated PINN backbone")
@@ -88,6 +89,7 @@ def main():
             lr_teacher=args.lr_teacher,
             lr_student=args.lr_student,
             teacher_hidden_dim=args.teacher_hidden_dim,
+            student_hidden_dim=args.student_hidden_dim,
             fourier_scale=args.fourier_scale,
             scale_space=args.scale_space,
             scale_time=args.scale_time,

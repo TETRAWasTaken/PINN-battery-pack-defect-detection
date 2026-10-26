@@ -12,6 +12,7 @@ class ModelConfig:
     lr_teacher: float = 1e-3
     lr_student: float = 1e-3
     teacher_hidden_dim: int = 128
+    student_hidden_dim: int = 64
     fourier_scale: float = 5.0
     scale_space: Optional[float] = None
     scale_time: Optional[float] = None

@@ -322,7 +322,7 @@ def run_single_experiment(
     print("\n -> Starting Knowledge Distillation to Student MLP...")
     student = StudentMLP(
         in_dim=6,
-        hidden_dim=32,
+        hidden_dim=config.student_hidden_dim,
         out_dim=2,
         coordinate_scale=(0.009, 0.009, 0.065, 3600.0, 2.0, 1.0),
         t_ambient=297.15
@@ -343,7 +343,7 @@ def run_single_experiment(
     best_student_state = None
     teacher.eval()
 
-    steps_per_epoch = 5
+    steps_per_epoch = 10
     for epoch in range(1, config.epochs_student + 1):
         epoch_losses = []
         for _ in range(steps_per_epoch):
