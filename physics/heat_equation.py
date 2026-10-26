@@ -155,17 +155,35 @@ def compute_centerline_symmetry_residual(model: nn.Module, center_coords: torch.
 
 
 def compute_core_conduction_coupling(model: nn.Module, core_coords: torch.Tensor,
-                                     surf_coords: torch.Tensor,
+                                     surf_data: torch.Tensor,
+                                     curr_i: Optional[torch.Tensor] = None,
+                                     soh: Optional[torch.Tensor] = None,
                                      min_delta: float = 1.5) -> torch.Tensor:
     """
-    Physical Core-to-Surface Thermal Ordering Constraint:
-    Because heat is generated in the core and removed at the surface,
-    T_core(z, t) must exceed T_surface(z, t) during active discharge.
-    Penalizes whenever (T_core - T_surface) < min_delta.
+    Physical Core-to-Surface Heat Conduction Coupling (Bernardi & Fourier Law):
+        T_core(t) >= T_surface_empirical(t) + delta_T_phys(I, SOH)
+    Directly anchors the unmeasured internal core to the measured outer thermocouple trajectory.
     """
     temp_core, _ = model(core_coords)
-    temp_surf, _ = model(surf_coords)
-    # Strictly penalize whenever core is cooler than surface + min_delta
-    inversion_delta = torch.relu((temp_surf + min_delta) - temp_core)
+    if surf_data.shape[-1] == 1:
+        temp_surf = surf_data
+    else:
+        temp_surf, _ = model(surf_data)
+
+    if curr_i is None and core_coords.shape[-1] >= 6:
+        curr_i = core_coords[:, 4:5]
+    if soh is None and core_coords.shape[-1] >= 6:
+        soh = core_coords[:, 5:6]
+
+    if curr_i is not None and soh is not None:
+        r_int = 0.08 + 0.12 * (1.0 - torch.clamp(soh, 0.4, 1.0))
+        q_gen = (torch.abs(curr_i) ** 2 * r_int) / CELL_VOLUME
+        delta_t_phys = torch.clamp((q_gen * (CELL_RADIUS ** 2)) / (4.0 * 2.5), min=min_delta, max=min_delta + 2.5)
+    else:
+        delta_t_phys = min_delta
+
+    target_min_core = temp_surf + delta_t_phys
+    inversion_delta = torch.relu(target_min_core - temp_core)
     return torch.mean(inversion_delta ** 2)
+
 

@@ -44,12 +44,14 @@ def _evaluate(
         coords_ic, _ = sampler.sample_initial_condition_data(device, n_points=100)
         coords_bc = sampler.sample_boundary_points(device, n_points=100)
         coords_center = sampler.sample_centerline_points(device, n_points=100)
-        coords_core, coords_surf_paired = sampler.sample_core_surface_pairs(device, n_points=100)
+        coords_core = coords_surf.clone()
+        coords_core[:, 0] = 0.0
+        coords_core[:, 1] = 0.0
 
         teacher_ic_mse = compute_initial_condition_residual(teacher, coords_ic)
         teacher_bc_mse = compute_robin_bc_residual(teacher, coords_bc)
         teacher_center_mse = compute_centerline_symmetry_residual(teacher, coords_center)
-        teacher_core_mse = compute_core_conduction_coupling(teacher, coords_core, coords_surf_paired)
+        teacher_core_mse = compute_core_conduction_coupling(teacher, coords_core, temp_surf)
 
     eval_coords = torch.cat([coords_surf, coords_coll], dim=0)
     with torch.no_grad():
@@ -207,7 +209,9 @@ def run_single_experiment(
         coords_ic, _ = sampler.sample_initial_condition_data(device, n_points=min(150, config.batch_size // 2))
         coords_bc = sampler.sample_boundary_points(device, n_points=min(150, config.batch_size // 2))
         coords_center = sampler.sample_centerline_points(device, n_points=min(100, config.batch_size // 2))
-        coords_core, coords_surf_p = sampler.sample_core_surface_pairs(device, n_points=min(100, config.batch_size // 2))
+        coords_core = coords_surf.clone()
+        coords_core[:, 0] = 0.0
+        coords_core[:, 1] = 0.0
 
         # Technique 5: Residual-Based Adaptive Refinement (RAR)
         if config.use_rar and (epoch % config.rar_frequency == 0):
@@ -246,8 +250,8 @@ def run_single_experiment(
         # 5. Centerline Symmetry constraint (dT/dr = 0 at r=0)
         loss_center = compute_centerline_symmetry_residual(teacher, coords_center)
 
-        # 6. Physical Core-to-Surface Thermal Ordering (T_core >= T_surface)
-        loss_core = compute_core_conduction_coupling(teacher, coords_core, coords_surf_p)
+        # 6. Physical Core-to-Surface Thermal Ordering (T_core >= T_surface + Delta_T)
+        loss_core = compute_core_conduction_coupling(teacher, coords_core, temp_surf)
 
         if config.use_adaptive_loss:
             optimizer_teacher.zero_grad()
@@ -317,7 +321,9 @@ def run_single_experiment(
             coords_ic, _ = sampler.sample_initial_condition_data(device)
             coords_bc = sampler.sample_boundary_points(device)
             coords_center = sampler.sample_centerline_points(device)
-            coords_core, coords_surf_p = sampler.sample_core_surface_pairs(device)
+            coords_core = coords_surf.clone()
+            coords_core[:, 0] = 0.0
+            coords_core[:, 1] = 0.0
 
             def closure():
                 optimizer_lbfgs.zero_grad()
@@ -327,7 +333,7 @@ def run_single_experiment(
                 lic = compute_initial_condition_residual(teacher, coords_ic)
                 lbc = compute_robin_bc_residual(teacher, coords_bc)
                 lcenter = compute_centerline_symmetry_residual(teacher, coords_center)
-                lcore = compute_core_conduction_coupling(teacher, coords_core, coords_surf_p)
+                lcore = compute_core_conduction_coupling(teacher, coords_core, temp_surf)
                 step_loss = (
                     config.lambda_surf * ls
                     + config.lambda_pde * lp
@@ -382,9 +388,11 @@ def run_single_experiment(
         epoch_losses = []
         for _ in range(steps_per_epoch):
             coords_surf, _, coords_coll = sampler.sample_data(device)
+            coords_core = coords_surf.clone()
+            coords_core[:, 0] = 0.0
+            coords_core[:, 1] = 0.0
             coords_center = sampler.sample_centerline_points(device, n_points=50)
-            coords_core, _ = sampler.sample_core_surface_pairs(device, n_points=50)
-            eval_coords = torch.cat([coords_surf, coords_coll, coords_center, coords_core], dim=0)
+            eval_coords = torch.cat([coords_surf, coords_coll, coords_core, coords_center], dim=0)
 
             with torch.no_grad():
                 t_temp, t_cond = teacher(eval_coords)
