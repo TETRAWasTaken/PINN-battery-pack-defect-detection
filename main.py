@@ -49,6 +49,8 @@ def parse_args():
     parser.add_argument("--lambda-surf", type=float, default=1.0, help="Surface sensor loss weighting factor")
     parser.add_argument("--lambda-ic", type=float, default=0.5, help="Initial condition loss weighting factor")
     parser.add_argument("--lambda-bc", type=float, default=0.01, help="Robin convective BC loss weighting factor")
+    parser.add_argument("--lambda-center", type=float, default=0.1, help="Centerline radial symmetry constraint (dT/dr = 0 at r=0)")
+    parser.add_argument("--lambda-core", type=float, default=0.5, help="Core-to-surface heat ordering constraint (T_core >= T_surface)")
     parser.add_argument("--no-scheduler", action="store_true", help="Disable CosineAnnealingLR scheduler")
     parser.add_argument("--adaptive-loss", action="store_true", help="Enable dynamic gradient balancing loss")
     parser.add_argument("--no-gated-backbone", action="store_true", help="Disable Wang et al. gated PINN backbone")
@@ -107,6 +109,8 @@ def main():
             lambda_surf=args.lambda_surf,
             lambda_ic=args.lambda_ic,
             lambda_bc=args.lambda_bc,
+            lambda_center=args.lambda_center,
+            lambda_core=args.lambda_core,
             epochs_teacher=args.epochs_teacher,
             epochs_student=args.epochs_student,
             batch_size=256,

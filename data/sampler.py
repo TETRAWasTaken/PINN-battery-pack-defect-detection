@@ -177,3 +177,45 @@ class BatteryDataSampler:
             dtype=torch.float32, device=device
         )
         return coords_bc
+
+    def sample_centerline_points(self, device: torch.device, n_points: int = 100) -> torch.Tensor:
+        """
+        Samples points along the central axis r = 0 for centerline symmetry constraint:
+            dT/dx = 0, dT/dy = 0 at x=0, y=0.
+        """
+        x = np.zeros(n_points)
+        y = np.zeros(n_points)
+        z = np.random.uniform(0, self.height, n_points)
+        t = np.random.uniform(0, self.t_max, n_points)
+        i = np.random.uniform(-2.5, 0.0, n_points)
+        soh = np.random.uniform(0.65, 1.0, n_points)
+
+        coords_center = torch.tensor(
+            np.stack([x, y, z, t, i, soh], axis=-1),
+            dtype=torch.float32, device=device
+        )
+        return coords_center
+
+    def sample_core_surface_pairs(self, device: torch.device, n_points: int = 100) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Samples paired core (r=0) and surface (r=R) points at identical (z, t, I, SOH)
+        for physical core-to-surface heat conduction ordering: T_core >= T_surface.
+        """
+        z = np.random.uniform(0, self.height, n_points)
+        t = np.random.uniform(100.0, self.t_max, n_points)
+        i = np.random.uniform(-2.5, -0.5, n_points)
+        soh = np.random.uniform(0.65, 1.0, n_points)
+
+        core_pts = torch.tensor(
+            np.stack([np.zeros(n_points), np.zeros(n_points), z, t, i, soh], axis=-1),
+            dtype=torch.float32, device=device
+        )
+
+        theta = np.random.uniform(0, 2 * np.pi, n_points)
+        x_surf = self.radius * np.cos(theta)
+        y_surf = self.radius * np.sin(theta)
+        surf_pts = torch.tensor(
+            np.stack([x_surf, y_surf, z, t, i, soh], axis=-1),
+            dtype=torch.float32, device=device
+        )
+        return core_pts, surf_pts

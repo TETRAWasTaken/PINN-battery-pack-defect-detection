@@ -20,7 +20,9 @@ from models.student_mlp import StudentMLP
 from physics.heat_equation import (
     compute_pde_residual,
     compute_robin_bc_residual,
-    compute_initial_condition_residual
+    compute_initial_condition_residual,
+    compute_centerline_symmetry_residual,
+    compute_core_conduction_coupling
 )
 
 
@@ -41,8 +43,13 @@ def _evaluate(
 
         coords_ic, _ = sampler.sample_initial_condition_data(device, n_points=100)
         coords_bc = sampler.sample_boundary_points(device, n_points=100)
+        coords_center = sampler.sample_centerline_points(device, n_points=100)
+        coords_core, coords_surf_paired = sampler.sample_core_surface_pairs(device, n_points=100)
+
         teacher_ic_mse = compute_initial_condition_residual(teacher, coords_ic)
         teacher_bc_mse = compute_robin_bc_residual(teacher, coords_bc)
+        teacher_center_mse = compute_centerline_symmetry_residual(teacher, coords_center)
+        teacher_core_mse = compute_core_conduction_coupling(teacher, coords_core, coords_surf_paired)
 
     eval_coords = torch.cat([coords_surf, coords_coll], dim=0)
     with torch.no_grad():
@@ -57,6 +64,8 @@ def _evaluate(
         "teacher_pde_mse": float(teacher_pde_mse.item()),
         "teacher_ic_mse": float(teacher_ic_mse.item()),
         "teacher_bc_mse": float(teacher_bc_mse.item()),
+        "teacher_center_mse": float(teacher_center_mse.item()),
+        "teacher_core_mse": float(teacher_core_mse.item()),
         "student_mse": float(student_mse.item()),
         "student_temp_mse": float(student_temp_mse.item()),
         "student_cond_mse": float(student_cond_mse.item()),
@@ -185,6 +194,8 @@ def run_single_experiment(
         "pde_loss": [],
         "ic_loss": [],
         "bc_loss": [],
+        "center_loss": [],
+        "core_loss": [],
         "lr": []
     }
     best_teacher_loss = float("inf")
@@ -195,6 +206,8 @@ def run_single_experiment(
         coords_surf, temp_surf, coords_coll = sampler.sample_data(device)
         coords_ic, _ = sampler.sample_initial_condition_data(device, n_points=min(150, config.batch_size // 2))
         coords_bc = sampler.sample_boundary_points(device, n_points=min(150, config.batch_size // 2))
+        coords_center = sampler.sample_centerline_points(device, n_points=min(100, config.batch_size // 2))
+        coords_core, coords_surf_p = sampler.sample_core_surface_pairs(device, n_points=min(100, config.batch_size // 2))
 
         # Technique 5: Residual-Based Adaptive Refinement (RAR)
         if config.use_rar and (epoch % config.rar_frequency == 0):
@@ -224,11 +237,17 @@ def run_single_experiment(
         # 2. Physics-informed PDE residual loss
         loss_pde = compute_pde_residual(teacher, coords_coll)
 
-        # 3. Initial Condition loss (Technique 3)
+        # 3. Initial Condition loss
         loss_ic = compute_initial_condition_residual(teacher, coords_ic)
 
-        # 4. Robin Boundary Condition loss (Technique 3)
+        # 4. Robin Boundary Condition loss
         loss_bc = compute_robin_bc_residual(teacher, coords_bc)
+
+        # 5. Centerline Symmetry constraint (dT/dr = 0 at r=0)
+        loss_center = compute_centerline_symmetry_residual(teacher, coords_center)
+
+        # 6. Physical Core-to-Surface Thermal Ordering (T_core >= T_surface)
+        loss_core = compute_core_conduction_coupling(teacher, coords_core, coords_surf_p)
 
         if config.use_adaptive_loss:
             optimizer_teacher.zero_grad()
@@ -250,6 +269,8 @@ def run_single_experiment(
             + effective_lambda_pde * loss_pde
             + config.lambda_ic * loss_ic
             + config.lambda_bc * loss_bc
+            + config.lambda_center * loss_center
+            + config.lambda_core * loss_core
         )
         total_loss.backward()
         torch.nn.utils.clip_grad_norm_(teacher.parameters(), max_norm=1.0)
@@ -265,6 +286,8 @@ def run_single_experiment(
         teacher_history["pde_loss"].append(loss_pde.item())
         teacher_history["ic_loss"].append(loss_ic.item())
         teacher_history["bc_loss"].append(loss_bc.item())
+        teacher_history["center_loss"].append(loss_center.item())
+        teacher_history["core_loss"].append(loss_core.item())
         teacher_history["lr"].append(current_lr)
 
         if loss_surf.item() < best_teacher_loss:
@@ -276,8 +299,8 @@ def run_single_experiment(
                   f"Total: {total_loss.item():.4f} | "
                   f"Surf: {loss_surf.item():.4f} | "
                   f"PDE: {loss_pde.item():.4f} | "
-                  f"IC: {loss_ic.item():.4f} | "
-                  f"BC: {loss_bc.item():.4f} | LR: {current_lr:.2e}")
+                  f"Core: {loss_core.item():.4f} | "
+                  f"Symm: {loss_center.item():.4f} | LR: {current_lr:.2e}")
 
     # Technique 4: Stage 2 L-BFGS Second-Order Curvature Polishing
     if config.lbfgs_epochs > 0:
@@ -293,6 +316,8 @@ def run_single_experiment(
             coords_surf, temp_surf, coords_coll = sampler.sample_data(device)
             coords_ic, _ = sampler.sample_initial_condition_data(device)
             coords_bc = sampler.sample_boundary_points(device)
+            coords_center = sampler.sample_centerline_points(device)
+            coords_core, coords_surf_p = sampler.sample_core_surface_pairs(device)
 
             def closure():
                 optimizer_lbfgs.zero_grad()
@@ -301,11 +326,15 @@ def run_single_experiment(
                 lp = compute_pde_residual(teacher, coords_coll)
                 lic = compute_initial_condition_residual(teacher, coords_ic)
                 lbc = compute_robin_bc_residual(teacher, coords_bc)
+                lcenter = compute_centerline_symmetry_residual(teacher, coords_center)
+                lcore = compute_core_conduction_coupling(teacher, coords_core, coords_surf_p)
                 step_loss = (
                     config.lambda_surf * ls
                     + config.lambda_pde * lp
                     + config.lambda_ic * lic
                     + config.lambda_bc * lbc
+                    + config.lambda_center * lcenter
+                    + config.lambda_core * lcore
                 )
                 step_loss.backward()
                 return step_loss
@@ -406,6 +435,8 @@ def run_single_experiment(
         "final_pde_loss": teacher_history["pde_loss"][-1],
         "final_ic_loss": teacher_history["ic_loss"][-1],
         "final_bc_loss": teacher_history["bc_loss"][-1],
+        "final_center_loss": teacher_history["center_loss"][-1] if teacher_history["center_loss"] else 0.0,
+        "final_core_loss": teacher_history["core_loss"][-1] if teacher_history["core_loss"] else 0.0,
         "final_student_distill_loss": student_history["distill_loss"][-1],
         "best_teacher_surface_loss": best_teacher_loss,
         "best_student_distill_loss": best_student_loss,
@@ -430,6 +461,8 @@ def run_single_experiment(
             "teacher_pde_loss": teacher_history["pde_loss"][i] if i < len(teacher_history["epoch"]) else None,
             "teacher_ic_loss": teacher_history["ic_loss"][i] if i < len(teacher_history["ic_loss"]) else None,
             "teacher_bc_loss": teacher_history["bc_loss"][i] if i < len(teacher_history["bc_loss"]) else None,
+            "teacher_center_loss": teacher_history["center_loss"][i] if i < len(teacher_history["center_loss"]) else None,
+            "teacher_core_loss": teacher_history["core_loss"][i] if i < len(teacher_history["core_loss"]) else None,
             "teacher_lr": teacher_history["lr"][i] if i < len(teacher_history["lr"]) else None,
             "student_distill_loss": student_history["distill_loss"][i] if i < len(student_history["epoch"]) else None,
         }
@@ -449,6 +482,8 @@ def run_single_experiment(
         "lambda_surf": config.lambda_surf,
         "lambda_ic": config.lambda_ic,
         "lambda_bc": config.lambda_bc,
+        "lambda_center": config.lambda_center,
+        "lambda_core": config.lambda_core,
         "use_gated_backbone": config.use_gated_backbone,
         "lbfgs_epochs": config.lbfgs_epochs,
         "use_rar": config.use_rar,
@@ -459,6 +494,8 @@ def run_single_experiment(
         "final_pde_loss": metrics["final_pde_loss"],
         "final_ic_loss": metrics["final_ic_loss"],
         "final_bc_loss": metrics["final_bc_loss"],
+        "final_center_loss": metrics["final_center_loss"],
+        "final_core_loss": metrics["final_core_loss"],
         "final_student_distill_loss": metrics["final_student_distill_loss"],
         "best_teacher_surface_loss": best_teacher_loss,
         "best_student_distill_loss": best_student_loss,
@@ -466,6 +503,8 @@ def run_single_experiment(
         "eval_teacher_pde_mse": evaluation_metrics["teacher_pde_mse"],
         "eval_teacher_ic_mse": evaluation_metrics["teacher_ic_mse"],
         "eval_teacher_bc_mse": evaluation_metrics["teacher_bc_mse"],
+        "eval_teacher_center_mse": evaluation_metrics["teacher_center_mse"],
+        "eval_teacher_core_mse": evaluation_metrics["teacher_core_mse"],
         "eval_student_mse": evaluation_metrics["student_mse"],
         "eval_student_temp_mse": evaluation_metrics["student_temp_mse"],
         "eval_student_cond_mse": evaluation_metrics["student_cond_mse"],

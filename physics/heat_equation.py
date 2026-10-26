@@ -66,8 +66,8 @@ def compute_pde_residual(model: nn.Module, coords: torch.Tensor,
 
     # PDE residual computation
     pde_res = rho * cp * dT_dt - div_k_grad_T - q_gen_dynamic
-    # Characteristic volumetric heat scale for numerical conditioning
-    residual_scale = max(float(torch.mean(torch.abs(q_gen_dynamic)).item()) if isinstance(q_gen_dynamic, torch.Tensor) else abs(q_gen), 2_000_000.0)
+    # Calibrated to true physical volumetric heat generation scale ~ 50,000 to 100,000 W/m^3
+    residual_scale = max(float(torch.mean(torch.abs(q_gen_dynamic)).item()) if isinstance(q_gen_dynamic, torch.Tensor) else abs(q_gen), 50_000.0)
     normalized_residual = torch.clamp(pde_res / residual_scale, min=-15.0, max=15.0)
 
     if return_pointwise:
@@ -126,4 +126,39 @@ def compute_initial_condition_residual(model: nn.Module, ic_coords: torch.Tensor
     temp_pred, _ = model(ic_coords)
     ic_residual = temp_pred - t_ambient
     return torch.mean(ic_residual ** 2)
+
+
+def compute_centerline_symmetry_residual(model: nn.Module, center_coords: torch.Tensor) -> torch.Tensor:
+    """
+    Enforces radial symmetry at the cylinder centerline (r=0):
+        dT/dx = 0, dT/dy = 0 at x=0, y=0.
+    Eliminates unphysical centerline kinks and wild spatial oscillations.
+    """
+    coords_req = center_coords.clone().detach().requires_grad_(True)
+    temp_pred, _ = model(coords_req)
+    grads = torch.autograd.grad(
+        outputs=temp_pred,
+        inputs=coords_req,
+        grad_outputs=torch.ones_like(temp_pred),
+        create_graph=True
+    )[0]
+    dT_dx = grads[:, 0:1]
+    dT_dy = grads[:, 1:2]
+    grad_scale = 100.0  # Normalized gradient scale ~ 1 K / 10mm
+    return torch.mean((dT_dx / grad_scale) ** 2 + (dT_dy / grad_scale) ** 2)
+
+
+def compute_core_conduction_coupling(model: nn.Module, core_coords: torch.Tensor,
+                                     surf_coords: torch.Tensor) -> torch.Tensor:
+    """
+    Physical Core-to-Surface Thermal Ordering Constraint:
+    Because heat is generated in the core and removed at the surface,
+    T_core(z, t) must be >= T_surface(z, t).
+    Penalizes any unphysical thermal inversion: ReLU(T_surface - T_core)^2.
+    """
+    temp_core, _ = model(core_coords)
+    temp_surf, _ = model(surf_coords)
+    # If surface is hotter than core, penalize the square of the inverted difference
+    inversion_delta = torch.relu(temp_surf - temp_core)
+    return torch.mean(inversion_delta ** 2)
 
