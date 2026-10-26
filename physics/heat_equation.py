@@ -149,16 +149,17 @@ def compute_centerline_symmetry_residual(model: nn.Module, center_coords: torch.
 
 
 def compute_core_conduction_coupling(model: nn.Module, core_coords: torch.Tensor,
-                                     surf_coords: torch.Tensor) -> torch.Tensor:
+                                     surf_coords: torch.Tensor,
+                                     min_delta: float = 0.5) -> torch.Tensor:
     """
     Physical Core-to-Surface Thermal Ordering Constraint:
     Because heat is generated in the core and removed at the surface,
-    T_core(z, t) must be >= T_surface(z, t).
-    Penalizes any unphysical thermal inversion: ReLU(T_surface - T_core)^2.
+    T_core(z, t) must exceed T_surface(z, t) during active discharge.
+    Penalizes any unphysical thermal inversion: ReLU(T_surface + min_delta - T_core)^2.
     """
     temp_core, _ = model(core_coords)
     temp_surf, _ = model(surf_coords)
-    # If surface is hotter than core, penalize the square of the inverted difference
-    inversion_delta = torch.relu(temp_surf - temp_core)
+    # Strictly penalize whenever core is cooler than surface + min_delta
+    inversion_delta = torch.relu((temp_surf + min_delta) - temp_core)
     return torch.mean(inversion_delta ** 2)
 

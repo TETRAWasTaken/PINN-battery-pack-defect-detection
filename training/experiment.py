@@ -290,8 +290,8 @@ def run_single_experiment(
         teacher_history["core_loss"].append(loss_core.item())
         teacher_history["lr"].append(current_lr)
 
-        if loss_surf.item() < best_teacher_loss:
-            best_teacher_loss = loss_surf.item()
+        if total_loss.item() < best_teacher_loss:
+            best_teacher_loss = total_loss.item()
             best_teacher_state = {k: v.detach().cpu().clone() for k, v in teacher.state_dict().items()}
 
         if epoch % max(1, config.epochs_teacher // 5) == 0 or epoch == 1:
@@ -342,10 +342,15 @@ def run_single_experiment(
             loss_val = optimizer_lbfgs.step(closure)
             pred_surf_now, _ = teacher(coords_surf)
             cur_surf_loss = nn.functional.mse_loss(pred_surf_now, temp_surf).item()
-            if cur_surf_loss < best_teacher_loss:
-                best_teacher_loss = cur_surf_loss
+            if loss_val.item() < best_teacher_loss:
+                best_teacher_loss = loss_val.item()
                 best_teacher_state = {k: v.detach().cpu().clone() for k, v in teacher.state_dict().items()}
             print(f" [L-BFGS Epoch {l_epoch:02d}/{config.lbfgs_epochs}] Loss: {loss_val.item():.4f} | Surf: {cur_surf_loss:.4f}")
+
+    # Load best teacher model before starting Knowledge Distillation
+    if best_teacher_state is not None:
+        teacher.load_state_dict(best_teacher_state)
+    teacher.eval()
 
     # 2. Knowledge Distillation to Student MLP (6D inputs)
     print("\n -> Starting Knowledge Distillation to Student MLP...")
@@ -377,7 +382,9 @@ def run_single_experiment(
         epoch_losses = []
         for _ in range(steps_per_epoch):
             coords_surf, _, coords_coll = sampler.sample_data(device)
-            eval_coords = torch.cat([coords_surf, coords_coll], dim=0)
+            coords_center = sampler.sample_centerline_points(device, n_points=50)
+            coords_core, _ = sampler.sample_core_surface_pairs(device, n_points=50)
+            eval_coords = torch.cat([coords_surf, coords_coll, coords_center, coords_core], dim=0)
 
             with torch.no_grad():
                 t_temp, t_cond = teacher(eval_coords)
