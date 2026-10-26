@@ -20,8 +20,8 @@ def parse_args():
         description="PINN Battery Pack Defect Detection & Student Distillation Pipeline"
     )
     parser.add_argument(
-        "--mode", choices=["batch", "single", "preprocess"], default="batch",
-        help="Run hyperparameter search ('batch'), one experiment ('single'), or raw data preprocessing ('preprocess')"
+        "--mode", choices=["batch", "single", "preprocess", "visualize"], default="batch",
+        help="Run hyperparameter search ('batch'), one experiment ('single'), data preprocessing ('preprocess'), or inference visualization ('visualize')"
     )
     parser.add_argument("--search", choices=["grid", "random"], default="random",
                         help="Batch search strategy")
@@ -82,6 +82,15 @@ def main():
             n_trials=args.n_trials,
             seed=args.seed,
         )
+    elif args.mode == "visualize":
+        import os
+        from inference_visualizer import load_models, generate_inference_dashboard, benchmark_inference_speed
+        exp_dir = os.path.join(output_dir, args.exp_id) if args.exp_id else output_dir
+        print(f"Starting Inference Demonstration & Visualization for: {exp_dir}...")
+        teacher, student = load_models(exp_dir, device)
+        save_path = os.path.join(exp_dir, "inference_dashboard.png")
+        generate_inference_dashboard(teacher, student, device, save_path=save_path)
+        benchmark_inference_speed(student, device)
     else:
         print(f"Starting Single Experiment: {args.exp_id}...")
         config = ModelConfig(

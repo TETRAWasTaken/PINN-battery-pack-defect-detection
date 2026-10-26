@@ -99,11 +99,13 @@ class TeacherPINN(nn.Module):
         )
 
     def forward(self, coords: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Graceful backwards compatibility: if 4D coords provided, pad with nominal I=-2.0 A, SOH=1.0
+        # Graceful backwards compatibility: if 4D coords provided to 6D model, pad; if 6D coords provided to 4D model, slice
         if coords.shape[-1] == 4 and self.coordinate_scale.shape[0] == 6:
             i_pad = torch.full((coords.shape[0], 1), -2.0, dtype=coords.dtype, device=coords.device)
             soh_pad = torch.full((coords.shape[0], 1), 1.0, dtype=coords.dtype, device=coords.device)
             coords = torch.cat([coords, i_pad, soh_pad], dim=-1)
+        elif coords.shape[-1] == 6 and self.coordinate_scale.shape[0] == 4:
+            coords = coords[:, :4]
 
         # Differentiable coordinate normalization to O(1) domain
         normalized_coords = coords / self.coordinate_scale
